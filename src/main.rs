@@ -42,7 +42,9 @@ async fn main() -> Result<(), std::io::Error> {
     let pool = db::init_db(&config.database_url).await.unwrap();
 
     // Run migrations
-    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    if let Err(e) = sqlx::migrate!("./migrations").run(&pool).await {
+        log::error!("Failed to run migrations: {}", e);
+    }
 
     let bot = Bot::new(config.telegram_bot_token);
 
@@ -86,7 +88,7 @@ async fn answer(bot: Bot, msg: Message, cmd: Command, pool: PgPool) -> ResponseR
         }
         Command::Order => {
             log::info!("Received order command");
-            bot.send_message(msg.chat.id, "Order command").await?;
+            handlers::order::place_order(bot, msg, pool).await?;
         }
         Command::Help => {
             log::info!("Received help command");

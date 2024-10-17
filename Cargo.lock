@@ -2144,6 +2144,7 @@ dependencies = [
  "futures",
  "log",
  "phf",
+ "rand",
  "serde",
  "serde_json",
  "sqlx",
