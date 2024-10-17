@@ -3,8 +3,11 @@ use envconfig::Envconfig;
 use sqlx::PgPool;
 use teloxide::{prelude::*, utils::command::BotCommands};
 
-mod db;
-mod handlers;
+#[path = "db/mod.rs"]
+pub mod db;
+
+#[path = "handlers/mod.rs"]
+pub mod handlers;
 
 #[derive(Envconfig)]
 pub struct Config {
