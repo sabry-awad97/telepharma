@@ -12,6 +12,9 @@ pub mod handlers;
 #[path = "services/mod.rs"]
 pub mod services;
 
+#[path = "utils/mod.rs"]
+pub mod utils;
+
 #[derive(Envconfig)]
 pub struct Config {
     #[envconfig(from = "TELEGRAM_BOT_TOKEN")]

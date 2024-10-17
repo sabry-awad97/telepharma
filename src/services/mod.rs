@@ -1,5 +1,9 @@
-use crate::db::models::Medicine;
+use crate::{
+    db::models::Medicine,
+    utils::{escape_markdown, format_date},
+};
 use chrono::Utc;
+use futures::future;
 use sqlx::PgPool;
 use teloxide::prelude::*;
 use tokio_cron_scheduler::{Job, JobScheduler};
@@ -31,8 +35,8 @@ pub async fn schedule_notifications(
     // Create a new JobScheduler
     let sched = JobScheduler::new().await?;
 
-    // Define the job to run daily at 8:00 AM
-    let job = Job::new_async("0 8 0 * * *", move |_uuid, _l| {
+    // Define the job to run every 5 seconds
+    let job = Job::new_async("*/5 * * * * *", move |_uuid, _l| {
         let bot = bot.clone();
         let pool = pool.clone();
         let chat_id = pharmacy_group_chat_id;
@@ -90,9 +94,20 @@ async fn check_and_notify_expiring_medicines(
     // Fetch the list of expiring medicines
     let medicines = fetch_expiring_medicines(pool).await?;
 
-    // Iterate over each expiring medicine and send a notification
-    for medicine in medicines {
-        send_expiry_notification(bot, chat_id, &medicine).await?;
+    // Create a vector to store all the notification futures
+    let notification_futures: Vec<_> = medicines
+        .iter()
+        .map(|medicine| send_expiry_notification(bot, chat_id, medicine))
+        .collect();
+
+    // Execute all notification futures concurrently
+    let results = future::join_all(notification_futures).await;
+
+    // Check if any notifications failed
+    for result in results {
+        if let Err(e) = result {
+            log::error!("Failed to send notification: {}", e);
+        }
     }
 
     // Return Ok if all operations succeeded
@@ -140,11 +155,27 @@ async fn send_expiry_notification(
     chat_id: ChatId,
     medicine: &Medicine,
 ) -> Result<(), teloxide::RequestError> {
-    // Construct the notification message
-    let message = format!("⚠️ Alert: Medicine {} is about to expire!", medicine.name);
+    // Calculate days until expiry
+    let days_until_expiry = (medicine.expiry_date - Utc::now().date_naive()).num_days();
 
-    // Send the message to the specified chat
-    bot.send_message(chat_id, message).await?;
+    // Escape special characters for Markdown
+    let escaped_name = escape_markdown(&medicine.name);
+    let formatted_date = format_date(medicine.expiry_date);
+    // Construct the notification message with Markdown formatting
+    let message = format!(
+        "⚠️ *Medicine Expiry Alert*\n\n\
+        *Name:* `{}`\n\
+        *Expiry Date:* `{}`\n\
+        *Days until expiry:* `{}`\n\
+        *Quantity:* `{}`\n\
+        Please check and take appropriate action\\.",
+        escaped_name, formatted_date, days_until_expiry, medicine.stock,
+    );
+
+    // Send the message to the specified chat with Markdown parsing
+    bot.send_message(chat_id, message)
+        .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+        .await?;
 
     // If we've reached this point, the message was sent successfully
     Ok(())
