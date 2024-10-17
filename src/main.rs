@@ -37,6 +37,10 @@ async fn main() -> Result<(), std::io::Error> {
 
     let config = Config::init_from_env().unwrap();
     let pool = db::init_db(&config.database_url).await.unwrap();
+
+    // Run migrations
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
     let bot = Bot::new(config.telegram_bot_token);
 
     // Create a shutdown signal handler

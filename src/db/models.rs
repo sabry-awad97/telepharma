@@ -1,7 +1,7 @@
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
-#[derive(sqlx::FromRow, Serialize, Deserialize, Debug)]
+#[derive(sqlx::FromRow, Serialize, Deserialize, Debug, Clone)]
 pub struct Medicine {
     pub id: i32,
     pub name: String,
@@ -9,7 +9,7 @@ pub struct Medicine {
     pub expiry_date: NaiveDate,
 }
 
-#[derive(sqlx::FromRow, Serialize, Deserialize, Debug)]
+#[derive(sqlx::FromRow, Serialize, Deserialize, Debug, Clone)]
 pub struct Order {
     pub id: i32,
     pub user_id: String,
