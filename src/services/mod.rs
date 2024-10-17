@@ -35,8 +35,8 @@ pub async fn schedule_notifications(
     // Create a new JobScheduler
     let sched = JobScheduler::new().await?;
 
-    // Define the job to run every 5 seconds
-    let job = Job::new_async("*/5 * * * * *", move |_uuid, _l| {
+    // Define the job to run daily at 8:00 AM
+    let job = Job::new_async("0 8 0 * * *", move |_uuid, _l| {
         let bot = bot.clone();
         let pool = pool.clone();
         let chat_id = pharmacy_group_chat_id;
