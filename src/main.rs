@@ -39,11 +39,29 @@ async fn main() -> Result<(), std::io::Error> {
     let pool = db::init_db(&config.database_url).await.unwrap();
     let bot = Bot::new(config.telegram_bot_token);
 
-    Command::repl(bot, move |cx, msg, cmd| {
-        let pool = pool.clone();
-        answer(cx, msg, cmd, pool)
-    })
-    .await;
+    // Create a shutdown signal handler
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to listen for Ctrl+C");
+        tx.send(()).ok();
+    });
+
+    // Run the bot with graceful shutdown
+    tokio::select! {
+        _ = Command::repl(bot, move |cx, msg, cmd| {
+            let pool = pool.clone();
+            answer(cx, msg, cmd, pool)
+        }) => {
+            log::info!("Bot stopped");
+        }
+        _ = rx => {
+            log::info!("Received shutdown signal");
+        }
+    }
+
+    log::info!("Shutting down gracefully");
     Ok(())
 }
 
