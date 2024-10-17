@@ -3,7 +3,7 @@ use teloxide::{prelude::*, types::Message};
 
 use crate::db::models::Medicine;
 
-pub async fn list_inventroy(bot: Bot, msg: Message, pool: PgPool) -> ResponseResult<()> {
+pub async fn list_inventory(bot: Bot, msg: Message, pool: PgPool) -> ResponseResult<()> {
     log::info!("Listing inventory");
     let medicines = sqlx::query_as::<_, Medicine>("SELECT * FROM medicines")
         .fetch_all(&pool)

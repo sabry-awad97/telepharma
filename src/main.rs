@@ -96,7 +96,7 @@ async fn answer(bot: Bot, msg: Message, cmd: Command, pool: PgPool) -> ResponseR
         }
         Command::Inventory => {
             log::info!("Received inventory command");
-            handlers::inventory::list_inventroy(bot, msg, pool).await?;
+            handlers::inventory::list_inventory(bot, msg, pool).await?;
         }
         Command::Order => {
             log::info!("Received order command");
