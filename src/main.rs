@@ -1,11 +1,18 @@
 use dotenvy::dotenv;
 use envconfig::Envconfig;
+use sqlx::PgPool;
 use teloxide::{prelude::*, utils::command::BotCommands};
+
+mod db;
+mod handlers;
 
 #[derive(Envconfig)]
 pub struct Config {
     #[envconfig(from = "TELEGRAM_BOT_TOKEN")]
     telegram_bot_token: String,
+
+    #[envconfig(from = "DATABASE_URL")]
+    database_url: String,
 }
 
 #[derive(BotCommands, Debug, Clone)]
@@ -29,13 +36,19 @@ async fn main() -> Result<(), std::io::Error> {
     dotenv().ok();
 
     let config = Config::init_from_env().unwrap();
+    let pool = db::init_db(&config.database_url).await.unwrap();
     let bot = Bot::new(config.telegram_bot_token);
 
-    Command::repl(bot, answer).await;
+    Command::repl(bot, move |cx, msg, cmd| {
+        let pool = pool.clone();
+        answer(cx, msg, cmd, pool)
+    })
+    .await;
     Ok(())
 }
 
-async fn answer(bot: Bot, msg: Message, cmd: Command) -> ResponseResult<()> {
+async fn answer(bot: Bot, msg: Message, cmd: Command, pool: PgPool) -> ResponseResult<()> {
+    println!("Received command: {:?}", pool);
     match cmd {
         Command::Start => {
             log::info!("Received start command");
@@ -44,7 +57,7 @@ async fn answer(bot: Bot, msg: Message, cmd: Command) -> ResponseResult<()> {
         }
         Command::Inventory => {
             log::info!("Received inventory command");
-            bot.send_message(msg.chat.id, "Inventory command").await?;
+            handlers::inventory::list_inventroy(bot, msg, pool).await?;
         }
         Command::Order => {
             log::info!("Received order command");
