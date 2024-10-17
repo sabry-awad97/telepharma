@@ -9,6 +9,9 @@ pub mod db;
 #[path = "handlers/mod.rs"]
 pub mod handlers;
 
+#[path = "services/mod.rs"]
+pub mod services;
+
 #[derive(Envconfig)]
 pub struct Config {
     #[envconfig(from = "TELEGRAM_BOT_TOKEN")]
@@ -16,6 +19,9 @@ pub struct Config {
 
     #[envconfig(from = "DATABASE_URL")]
     database_url: String,
+
+    #[envconfig(from = "PHARMACY_GROUP_CHAT_ID")]
+    pharmacy_group_chat_id: i64,
 }
 
 #[derive(BotCommands, Debug, Clone)]
@@ -32,7 +38,7 @@ enum Command {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), std::io::Error> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
 
     log::info!("Starting the pharmacy bot...");
@@ -47,6 +53,9 @@ async fn main() -> Result<(), std::io::Error> {
     }
 
     let bot = Bot::new(config.telegram_bot_token);
+    // Schedule notifications
+    let pharmacy_group_chat_id = ChatId(config.pharmacy_group_chat_id);
+    services::schedule_notifications(pool.clone(), bot.clone(), pharmacy_group_chat_id).await?;
 
     // Create a shutdown signal handler
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
