@@ -1,3 +1,6 @@
+#[macro_use]
+extern crate rust_i18n;
+
 use chrono::Duration;
 use dotenvy::dotenv;
 use dptree::case;
@@ -5,7 +8,6 @@ use envconfig::Envconfig;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::Row;
 use sqlx::SqlitePool;
-use std::collections::HashMap;
 use std::str::FromStr;
 use teloxide::{
     dispatching::{
@@ -19,6 +21,8 @@ use teloxide::{
 
 pub mod services;
 pub mod utils;
+
+i18n!("locales", fallback = "en");
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -106,60 +110,6 @@ pub struct Order {
     pub created_at: chrono::NaiveDate,
 }
 
-// Add this new struct to represent our translations
-#[derive(Clone)]
-struct I18n {
-    translations: HashMap<String, HashMap<String, String>>,
-}
-
-impl I18n {
-    fn new() -> Self {
-        let mut translations = HashMap::new();
-
-        // English translations
-        let mut en = HashMap::new();
-        en.insert(
-            "welcome".to_string(),
-            "Welcome to the pharmacy bot!".to_string(),
-        );
-        en.insert("inventory".to_string(), "Available medicines:".to_string());
-        en.insert(
-            "no_medicines".to_string(),
-            "No medicines found in the inventory".to_string(),
-        );
-        // ... add more English translations ...
-
-        // Spanish translations
-        let mut es = HashMap::new();
-        es.insert(
-            "welcome".to_string(),
-            "¡Bienvenido al bot de farmacia!".to_string(),
-        );
-        es.insert(
-            "inventory".to_string(),
-            "Medicamentos disponibles:".to_string(),
-        );
-        es.insert(
-            "no_medicines".to_string(),
-            "No se encontraron medicamentos en el inventario".to_string(),
-        );
-        // ... add more Spanish translations ...
-
-        translations.insert("en".to_string(), en);
-        translations.insert("es".to_string(), es);
-
-        I18n { translations }
-    }
-
-    fn get(&self, lang: &str, key: &str) -> String {
-        self.translations
-            .get(lang)
-            .and_then(|map| map.get(key))
-            .cloned()
-            .unwrap_or_else(|| format!("Missing translation: {}", key))
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     // Initialize the logger with default settings or "info" level if not specified
@@ -181,8 +131,6 @@ async fn main() -> Result<(), Error> {
     // Create a new Telegram bot instance with the token from config
     let bot = Bot::new(config.telegram_bot_token);
 
-    let i18n = I18n::new();
-
     // Set up the message handler for the bot
     let handler =
         dialogue::enter::<Update, InMemStorage<State>, State, _>()
@@ -201,7 +149,7 @@ async fn main() -> Result<(), Error> {
     // Build and run the dispatcher
     Dispatcher::builder(bot, handler)
         // Add dependencies: database pool and in-memory storage for dialogue states
-        .dependencies(dptree::deps![pool, InMemStorage::<State>::new(), i18n])
+        .dependencies(dptree::deps![pool, InMemStorage::<State>::new()])
         // Enable handling of Ctrl+C for graceful shutdown
         .enable_ctrlc_handler()
         .build()
@@ -226,7 +174,6 @@ async fn main() -> Result<(), Error> {
 /// * `pool` - The database connection pool.
 /// * `dialogue` - The dialogue state for managing conversation flow.
 /// * `me` - Information about the bot itself.
-/// * `i18n` - The internationalization (i18n) instance for translations.
 ///
 /// # Returns
 ///
@@ -238,7 +185,6 @@ async fn answer(
     pool: SqlitePool,
     dialogue: MyDialogue,
     me: Me,
-    i18n: I18n,
 ) -> Result<(), Error> {
     // Determine the user's language (you might want to store this in a database)
     let lang = msg
@@ -254,7 +200,7 @@ async fn answer(
                 // Case 1: No start parameter provided
                 // Log the received command and send a welcome message
                 log::info!("Received start command without parameter");
-                bot.send_message(msg.chat.id, i18n.get(&lang, "welcome"))
+                bot.send_message(msg.chat.id, t!("start", locale = &lang))
                     .await?;
             } else {
                 // Case 2 & 3: Start parameter provided (could be valid or invalid)
@@ -306,7 +252,7 @@ async fn answer(
         Command::Inventory => {
             // Handle inventory command
             log::info!("Received inventory command");
-            list_inventory(bot.clone(), msg.clone(), pool, i18n).await?;
+            list_inventory(bot.clone(), msg.clone(), pool).await?;
 
             // Test case: Send "/inventory" command to the bot
             // Expected behavior:
@@ -341,7 +287,7 @@ async fn answer(
             .one_time_keyboard(); // Make the keyboard disappear after one use
 
             // Define the welcome message
-            let menu_text = "Welcome to the Pharmacy Bot! Please choose an option:";
+            let menu_text = t!("start", locale = &lang);
 
             // Send the message with the custom keyboard
             bot.send_message(msg.chat.id, menu_text)
@@ -363,22 +309,7 @@ async fn answer(
         Command::Help => {
             // Display help information
             log::info!("Received help command");
-            let help_text = [
-                "*Pharmacy Bot Help*",
-                "",
-                "Here are the available commands:",
-                "",
-                "/start \\- Start interacting with the pharmacy bot",
-                "/inventory \\- Check the pharmacy inventory",
-                "/order \\- Place a medicine order",
-                "/menu \\- Display the main menu",
-                "/help \\- Display this help information",
-                "",
-                "To use a command, simply type it or tap on it\\.",
-            ]
-            .join("\n");
-
-            bot.send_message(msg.chat.id, help_text)
+            bot.send_message(msg.chat.id, t!("help", locale = &lang))
                 .parse_mode(teloxide::types::ParseMode::MarkdownV2)
                 .await?;
 
@@ -501,6 +432,12 @@ async fn send_message_to_pharmacist(
     msg: Message,
     dialogue: MyDialogue,
 ) -> Result<(), Error> {
+    let lang = msg
+        .from
+        .as_ref()
+        .and_then(|user| user.language_code.clone())
+        .unwrap_or_else(|| "en".to_string());
+
     if let Some(text) = msg.text() {
         // Attempt to send the message to the pharmacist
         let sent_result = bot
@@ -509,21 +446,18 @@ async fn send_message_to_pharmacist(
 
         // Notify the user based on the result
         if sent_result.is_ok() {
-            bot.send_message(msg.chat.id, "Message sent to the pharmacist!")
+            bot.send_message(msg.chat.id, t!("message_sent", locale = &lang))
                 .await?;
         } else {
-            bot.send_message(
-                msg.chat.id,
-                "Error sending message. The pharmacist may have blocked the bot.",
-            )
-            .await?;
+            bot.send_message(msg.chat.id, t!("message_error", locale = &lang))
+                .await?;
         }
 
         // Exit the dialogue state
         dialogue.exit().await?;
     } else {
         // Prompt the user to send a text message if no text was found
-        bot.send_message(msg.chat.id, "Please send a text message.")
+        bot.send_message(msg.chat.id, t!("send_text", locale = &lang))
             .await?;
     }
     Ok(())
@@ -557,16 +491,23 @@ async fn send_message_to_pharmacist(
 ///
 /// - Any errors during the process are propagated up the call stack.
 async fn handle_message(bot: Bot, msg: Message, pool: SqlitePool) -> Result<(), Error> {
+    let lang = msg
+        .from
+        .as_ref()
+        .and_then(|user| user.language_code.clone())
+        .unwrap_or_else(|| "en".to_string());
+
     if let Some(text) = msg.text() {
         match text {
-            "📋 Check Inventory" => list_inventory(bot, msg, pool, I18n::new()).await?,
+            "📋 Check Inventory" => list_inventory(bot, msg, pool).await?,
             "🛒 Place Order" => place_order(bot, msg, pool).await?,
             "❓ Help" => {
                 bot.send_message(msg.chat.id, Command::descriptions().to_string())
                     .await?;
             }
             _ => {
-                bot.send_message(msg.chat.id, "I don't understand that command. Please use the menu or type /help for available commands.").await?;
+                bot.send_message(msg.chat.id, t!("unknown_command", locale = &lang))
+                    .await?;
             }
         }
     }
@@ -583,7 +524,6 @@ async fn handle_message(bot: Bot, msg: Message, pool: SqlitePool) -> Result<(), 
 /// * `bot` - The Bot instance used to send messages.
 /// * `msg` - The original message that triggered this function.
 /// * `pool` - The database connection pool.
-/// * `i18n` - The internationalization (i18n) instance for translations.
 ///
 /// # Returns
 ///
@@ -613,12 +553,7 @@ async fn handle_message(bot: Bot, msg: Message, pool: SqlitePool) -> Result<(), 
 /// - The expiry date (formatted as "DD Mon YYYY")
 ///
 /// Medicines are separated by two newlines for readability.
-async fn list_inventory(
-    bot: Bot,
-    msg: Message,
-    pool: SqlitePool,
-    i18n: I18n,
-) -> ResponseResult<()> {
+async fn list_inventory(bot: Bot, msg: Message, pool: SqlitePool) -> ResponseResult<()> {
     let lang = msg
         .from
         .and_then(|user| user.language_code.clone())
@@ -631,7 +566,7 @@ async fn list_inventory(
         .unwrap_or_else(|_| vec![]);
 
     if medicines.is_empty() {
-        bot.send_message(msg.chat.id, i18n.get(&lang, "no_medicines"))
+        bot.send_message(msg.chat.id, t!("no_medicines", locale = &lang))
             .await?;
         return Ok(());
     }
@@ -649,7 +584,7 @@ async fn list_inventory(
         .collect::<Vec<String>>()
         .join("\n\n");
 
-    let formatted_message = format!("{}:\n\n{}", i18n.get(&lang, "inventory"), message);
+    let formatted_message = format!("{}:\n\n{}", t!("inventory", locale = &lang), message);
 
     bot.send_message(msg.chat.id, formatted_message).await?;
 
@@ -690,6 +625,12 @@ async fn list_inventory(
 /// - In a real-world scenario, these would typically be provided by the user through interaction.
 /// - The function uses database transactions to ensure data consistency when updating stock and creating orders.
 pub async fn place_order(bot: Bot, msg: Message, pool: SqlitePool) -> Result<(), crate::Error> {
+    let lang = msg
+        .from
+        .as_ref()
+        .and_then(|user| user.language_code.clone())
+        .unwrap_or_else(|| "en".to_string());
+
     let user_id = msg.from.unwrap().id.to_string();
 
     let medicine_name = "acetaminophen";
@@ -720,7 +661,7 @@ pub async fn place_order(bot: Bot, msg: Message, pool: SqlitePool) -> Result<(),
         let now = chrono::Utc::now().with_timezone(&local_tz);
 
         // Create order
-        let order_id = sqlx::query("INSERT INTO orders (user_id, medicine_id, quantity, status, created_at) VALUES ($1, $2, $3, 'pending', $4) RETURNING id")
+        let _ = sqlx::query("INSERT INTO orders (user_id, medicine_id, quantity, status, created_at) VALUES ($1, $2, $3, 'pending', $4) RETURNING id")
             .bind(&user_id)
             .bind(medicine.id)
             .bind(quantity)
@@ -732,16 +673,11 @@ pub async fn place_order(bot: Bot, msg: Message, pool: SqlitePool) -> Result<(),
         // Commit the transaction
         transaction.commit().await?;
 
-        bot.send_message(
-            msg.chat.id,
-            format!(
-                "Your order for {} (x{}) has been placed. Order ID: {}",
-                medicine.name, quantity, order_id
-            ),
-        )
-        .await?;
+        bot.send_message(msg.chat.id, t!("order_placed", locale = &lang))
+            .await?;
     } else {
-        bot.send_message(msg.chat.id, "Insufficient stock").await?;
+        bot.send_message(msg.chat.id, t!("insufficient_stock", locale = &lang))
+            .await?;
     }
 
     Ok(())
@@ -776,24 +712,27 @@ pub async fn place_order(bot: Bot, msg: Message, pool: SqlitePool) -> Result<(),
 /// This function uses `unban_chat_member` to kick the user. In Telegram's API,
 /// unbanning a user who is in the chat will remove them from the chat.
 async fn kick_user(bot: Bot, msg: Message) -> ResponseResult<()> {
+    let lang = msg
+        .from
+        .as_ref()
+        .and_then(|user| user.language_code.clone())
+        .unwrap_or_else(|| "en".to_string());
+
     if let Some(replied) = msg.reply_to_message() {
         if let Some(user) = &replied.from {
             // Kick the user by "unbanning" them
             bot.unban_chat_member(msg.chat.id, user.id).await?;
             // Send confirmation message
-            bot.send_message(
-                msg.chat.id,
-                format!("User {} has been kicked.", user.first_name),
-            )
-            .await?;
+            bot.send_message(msg.chat.id, t!("user_kicked", locale = &lang))
+                .await?;
         } else {
             // Send error message if user couldn't be identified
-            bot.send_message(msg.chat.id, "Couldn't identify the user to kick.")
+            bot.send_message(msg.chat.id, t!("cant_identify_user", locale = &lang))
                 .await?;
         }
     } else {
         // Send instruction if the command wasn't a reply
-        bot.send_message(msg.chat.id, "Use this command in reply to another message")
+        bot.send_message(msg.chat.id, t!("use_as_reply", locale = &lang))
             .await?;
     }
     Ok(())
@@ -835,6 +774,12 @@ async fn kick_user(bot: Bot, msg: Message) -> ResponseResult<()> {
 /// This function uses `kick_chat_member` with an `until_date` parameter to implement a temporary ban.
 /// After the specified duration, the user will be able to join the chat again.
 async fn ban_user(bot: Bot, msg: Message, time: Duration) -> ResponseResult<()> {
+    let lang = msg
+        .from
+        .as_ref()
+        .and_then(|user| user.language_code.clone())
+        .unwrap_or_else(|| "en".to_string());
+
     // This code handles the process of banning a user in a Telegram chat.
     // Here's a breakdown of what it does:
 
@@ -850,26 +795,17 @@ async fn ban_user(bot: Bot, msg: Message, time: Duration) -> ResponseResult<()> 
                 .await?;
 
             // 4. If the ban is successful, send a confirmation message
-            bot.send_message(
-                msg.chat.id,
-                format!(
-                    "User {} has been banned for the specified duration.",
-                    user.first_name
-                ),
-            )
-            .await?;
+            bot.send_message(msg.chat.id, t!("user_banned", locale = &lang))
+                .await?;
         } else {
             // 5. If we couldn't identify the user, send an error message
-            bot.send_message(msg.chat.id, "Couldn't identify the user to ban.")
+            bot.send_message(msg.chat.id, t!("cant_identify_user", locale = &lang))
                 .await?;
         }
     } else {
         // 6. If the command wasn't a reply, instruct the user on how to use it
-        bot.send_message(
-            msg.chat.id,
-            "Use this command in a reply to another message!",
-        )
-        .await?;
+        bot.send_message(msg.chat.id, t!("use_as_reply", locale = &lang))
+            .await?;
     }
     Ok(())
 }
