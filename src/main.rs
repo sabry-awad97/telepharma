@@ -5,6 +5,7 @@ use envconfig::Envconfig;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::Row;
 use sqlx::SqlitePool;
+use std::collections::HashMap;
 use std::str::FromStr;
 use teloxide::{
     dispatching::{
@@ -105,6 +106,60 @@ pub struct Order {
     pub created_at: chrono::NaiveDate,
 }
 
+// Add this new struct to represent our translations
+#[derive(Clone)]
+struct I18n {
+    translations: HashMap<String, HashMap<String, String>>,
+}
+
+impl I18n {
+    fn new() -> Self {
+        let mut translations = HashMap::new();
+
+        // English translations
+        let mut en = HashMap::new();
+        en.insert(
+            "welcome".to_string(),
+            "Welcome to the pharmacy bot!".to_string(),
+        );
+        en.insert("inventory".to_string(), "Available medicines:".to_string());
+        en.insert(
+            "no_medicines".to_string(),
+            "No medicines found in the inventory".to_string(),
+        );
+        // ... add more English translations ...
+
+        // Spanish translations
+        let mut es = HashMap::new();
+        es.insert(
+            "welcome".to_string(),
+            "¡Bienvenido al bot de farmacia!".to_string(),
+        );
+        es.insert(
+            "inventory".to_string(),
+            "Medicamentos disponibles:".to_string(),
+        );
+        es.insert(
+            "no_medicines".to_string(),
+            "No se encontraron medicamentos en el inventario".to_string(),
+        );
+        // ... add more Spanish translations ...
+
+        translations.insert("en".to_string(), en);
+        translations.insert("es".to_string(), es);
+
+        I18n { translations }
+    }
+
+    fn get(&self, lang: &str, key: &str) -> String {
+        self.translations
+            .get(lang)
+            .and_then(|map| map.get(key))
+            .cloned()
+            .unwrap_or_else(|| format!("Missing translation: {}", key))
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     // Initialize the logger with default settings or "info" level if not specified
@@ -126,6 +181,8 @@ async fn main() -> Result<(), Error> {
     // Create a new Telegram bot instance with the token from config
     let bot = Bot::new(config.telegram_bot_token);
 
+    let i18n = I18n::new();
+
     // Set up the message handler for the bot
     let handler =
         dialogue::enter::<Update, InMemStorage<State>, State, _>()
@@ -141,67 +198,15 @@ async fn main() -> Result<(), Error> {
             // Handle all other messages
             .branch(Update::filter_message().endpoint(handle_message));
 
-    // Explanation of each line:
-    // 1. Create a handler using dialogue::enter
-    //    This sets up a dialogue system to manage different conversation states
-    //    The generic types specify:
-    //    - Update: Represents an update from the Telegram API
-    //    - InMemStorage<State>: Uses in-memory storage for dialogue states
-    //    - State: Our custom State enum for tracking conversation state
-    //    - _: Placeholder for the return type of the handler
-
-    // 2. Handle command messages
-    //    - Uses Update::filter_message() to only process message updates
-    //    - Further filters with filter_command::<Command>() to handle bot commands
-    //    - Routes these to the 'answer' function
-
-    // 3. Handle messages in the WriteToPharmacist state
-    //    - Again uses Update::filter_message() to process only message updates
-    //    - Uses case![State::WriteToPharmacist { id }] to match the specific state
-    //    - Routes these to the 'send_message_to_pharmacist' function
-
-    // 4. Handle all other messages
-    //    - Catches any remaining message updates
-    //    - Routes these to the 'handle_message' function
-
-    // This structure allows the bot to handle different types of interactions,
-    // maintaining state when necessary and providing a catch-all for general messages.
-
     // Build and run the dispatcher
     Dispatcher::builder(bot, handler)
         // Add dependencies: database pool and in-memory storage for dialogue states
-        .dependencies(dptree::deps![pool, InMemStorage::<State>::new()])
+        .dependencies(dptree::deps![pool, InMemStorage::<State>::new(), i18n])
         // Enable handling of Ctrl+C for graceful shutdown
         .enable_ctrlc_handler()
         .build()
         .dispatch()
         .await;
-
-    // Detailed explanation:
-    // 1. Dispatcher::builder(bot, handler):
-    //    - Creates a new Dispatcher builder with the given bot instance and handler.
-    //    - The handler is the message processing logic we defined earlier.
-
-    // 2. .dependencies(dptree::deps![pool, InMemStorage::<State>::new()]):
-    //    - Adds dependencies that will be available to all handler functions.
-    //    - pool: The database connection pool for database operations.
-    //    - InMemStorage::<State>::new(): Creates a new in-memory storage for dialogue states.
-    //      This allows the bot to maintain conversation state across messages.
-
-    // 3. .enable_ctrlc_handler():
-    //    - Enables the Ctrl+C handler for graceful shutdown.
-    //    - When Ctrl+C is pressed, the bot will attempt to shut down cleanly.
-
-    // 4. .build():
-    //    - Finalizes the Dispatcher configuration and builds the Dispatcher instance.
-
-    // 5. .dispatch().await:
-    //    - Starts the Dispatcher, which begins processing incoming updates from Telegram.
-    //    - This is an asynchronous operation, so we use .await to wait for it to complete.
-    //    - The Dispatcher will continue running until it's interrupted (e.g., by Ctrl+C).
-
-    // This setup allows the bot to process messages, maintain state, and gracefully
-    // handle shutdown requests, providing a robust foundation for the Telegram bot.
 
     // Log shutdown message
     log::info!("Shutting down gracefully");
@@ -221,6 +226,7 @@ async fn main() -> Result<(), Error> {
 /// * `pool` - The database connection pool.
 /// * `dialogue` - The dialogue state for managing conversation flow.
 /// * `me` - Information about the bot itself.
+/// * `i18n` - The internationalization (i18n) instance for translations.
 ///
 /// # Returns
 ///
@@ -232,7 +238,15 @@ async fn answer(
     pool: SqlitePool,
     dialogue: MyDialogue,
     me: Me,
+    i18n: I18n,
 ) -> Result<(), Error> {
+    // Determine the user's language (you might want to store this in a database)
+    let lang = msg
+        .from
+        .as_ref()
+        .and_then(|user| user.language_code.clone())
+        .unwrap_or_else(|| "en".to_string());
+
     match cmd {
         Command::Start(start_param) => {
             // This block handles the /start command with an optional parameter
@@ -240,7 +254,7 @@ async fn answer(
                 // Case 1: No start parameter provided
                 // Log the received command and send a welcome message
                 log::info!("Received start command without parameter");
-                bot.send_message(msg.chat.id, "Welcome to the pharmacy bot!")
+                bot.send_message(msg.chat.id, i18n.get(&lang, "welcome"))
                     .await?;
             } else {
                 // Case 2 & 3: Start parameter provided (could be valid or invalid)
@@ -292,7 +306,7 @@ async fn answer(
         Command::Inventory => {
             // Handle inventory command
             log::info!("Received inventory command");
-            list_inventory(bot, msg, pool).await?;
+            list_inventory(bot.clone(), msg.clone(), pool, i18n).await?;
 
             // Test case: Send "/inventory" command to the bot
             // Expected behavior:
@@ -545,7 +559,7 @@ async fn send_message_to_pharmacist(
 async fn handle_message(bot: Bot, msg: Message, pool: SqlitePool) -> Result<(), Error> {
     if let Some(text) = msg.text() {
         match text {
-            "📋 Check Inventory" => list_inventory(bot, msg, pool).await?,
+            "📋 Check Inventory" => list_inventory(bot, msg, pool, I18n::new()).await?,
             "🛒 Place Order" => place_order(bot, msg, pool).await?,
             "❓ Help" => {
                 bot.send_message(msg.chat.id, Command::descriptions().to_string())
@@ -569,6 +583,7 @@ async fn handle_message(bot: Bot, msg: Message, pool: SqlitePool) -> Result<(), 
 /// * `bot` - The Bot instance used to send messages.
 /// * `msg` - The original message that triggered this function.
 /// * `pool` - The database connection pool.
+/// * `i18n` - The internationalization (i18n) instance for translations.
 ///
 /// # Returns
 ///
@@ -598,7 +613,17 @@ async fn handle_message(bot: Bot, msg: Message, pool: SqlitePool) -> Result<(), 
 /// - The expiry date (formatted as "DD Mon YYYY")
 ///
 /// Medicines are separated by two newlines for readability.
-async fn list_inventory(bot: Bot, msg: Message, pool: SqlitePool) -> ResponseResult<()> {
+async fn list_inventory(
+    bot: Bot,
+    msg: Message,
+    pool: SqlitePool,
+    i18n: I18n,
+) -> ResponseResult<()> {
+    let lang = msg
+        .from
+        .and_then(|user| user.language_code.clone())
+        .unwrap_or_else(|| "en".to_string());
+
     log::info!("Listing inventory");
     let medicines = sqlx::query_as::<_, Medicine>("SELECT * FROM medicines")
         .fetch_all(&pool)
@@ -606,7 +631,7 @@ async fn list_inventory(bot: Bot, msg: Message, pool: SqlitePool) -> ResponseRes
         .unwrap_or_else(|_| vec![]);
 
     if medicines.is_empty() {
-        bot.send_message(msg.chat.id, "No medicines found in the inventory")
+        bot.send_message(msg.chat.id, i18n.get(&lang, "no_medicines"))
             .await?;
         return Ok(());
     }
@@ -624,7 +649,7 @@ async fn list_inventory(bot: Bot, msg: Message, pool: SqlitePool) -> ResponseRes
         .collect::<Vec<String>>()
         .join("\n\n");
 
-    let formatted_message = format!("*Available medicines:*\n\n{}", message);
+    let formatted_message = format!("{}:\n\n{}", i18n.get(&lang, "inventory"), message);
 
     bot.send_message(msg.chat.id, formatted_message).await?;
 
@@ -800,7 +825,7 @@ async fn kick_user(bot: Bot, msg: Message) -> ResponseResult<()> {
 /// # Function flow
 ///
 /// 1. Check if the command is a reply to another message.
-/// 2. If it is a reply, try to identify the user to be banned.
+/// 2. If it's a reply, try to get the user who sent the original message.
 /// 3. If a user is identified, attempt to ban them for the specified duration.
 /// 4. Send a confirmation message if the ban is successful.
 /// 5. If any step fails, send an appropriate error message.
