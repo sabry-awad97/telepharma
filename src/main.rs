@@ -89,9 +89,9 @@ pub type MyDialogue = Dialogue<State, InMemStorage<State>>;
 
 #[derive(sqlx::FromRow, serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct Medicine {
-    pub id: i32,
+    pub id: i64,
     pub name: String,
-    pub stock: i32,
+    pub stock: i64,
     pub expiry_date: chrono::NaiveDate,
 }
 
@@ -567,7 +567,7 @@ async fn handle_message(bot: Bot, msg: Message, pool: SqlitePool) -> Result<(), 
 /// # Arguments
 ///
 /// * `bot` - The Bot instance used to send messages.
-/// * msg` - The original message that triggered this function.
+/// * `msg` - The original message that triggered this function.
 /// * `pool` - The database connection pool.
 ///
 /// # Returns
@@ -661,65 +661,62 @@ async fn list_inventory(bot: Bot, msg: Message, pool: SqlitePool) -> ResponseRes
 ///
 /// # Notes
 ///
-/// - This implementation uses hardcoded values for medicine ID and quantity.
+/// - This implementation uses hardcoded values for medicine name and quantity.
 /// - In a real-world scenario, these would typically be provided by the user through interaction.
 /// - The function uses database transactions to ensure data consistency when updating stock and creating orders.
-pub async fn place_order(bot: Bot, msg: Message, pool: SqlitePool) -> ResponseResult<()> {
+pub async fn place_order(bot: Bot, msg: Message, pool: SqlitePool) -> Result<(), crate::Error> {
     let user_id = msg.from.unwrap().id.to_string();
 
-    // Simplified: Assume we're always ordering medicine with ID 1
-    let medicine_id = 1;
+    let medicine_name = "acetaminophen";
     let quantity = 2;
 
-    let medicine = sqlx::query_as::<_, Medicine>("SELECT * FROM medicines WHERE id = $1")
-        .bind(medicine_id)
-        .fetch_one(&pool)
-        .await;
+    let search_pattern = format!("%{}%", medicine_name);
+    let medicine = sqlx::query_as!(
+        Medicine,
+        "SELECT * FROM medicines WHERE LOWER(name) LIKE LOWER($1) LIMIT 1",
+        search_pattern
+    )
+    .fetch_one(&pool)
+    .await?;
 
-    if let Ok(medicine) = medicine {
-        if medicine.stock >= quantity {
-            // Reduce stock and create order
-            if let Err(e) = sqlx::query("UPDATE medicines SET stock = stock - $1 WHERE id = $2")
-                .bind(quantity)
-                .bind(medicine_id)
-                .execute(&pool)
-                .await
-            {
-                log::error!("Failed to update stock: {}", e);
-                bot.send_message(msg.chat.id, "Failed to update stock")
-                    .await?;
-                return Ok(());
-            }
+    if medicine.stock >= quantity {
+        // Start a transaction
+        let mut transaction = pool.begin().await?;
 
-            let now = chrono::Utc::now().naive_utc();
-            let order_id = match sqlx::query("INSERT INTO orders (user_id, medicine_id, quantity, status, created_at) VALUES ($1, $2, $3, 'pending', $4) RETURNING id")
-                .bind(&user_id)
-                .bind(medicine_id)
-                .bind(quantity)
-                .bind(now)
-                .fetch_one(&pool)
-                .await
-            {
-                Ok(row) => row.get::<i32, _>("id"),
-                Err(e) => {
-                    log::error!("Failed to create order: {}", e);
-                    bot.send_message(msg.chat.id, "Failed to create order").await?;
-                    return Ok(());
-                }
-            };
-            bot.send_message(
-                msg.chat.id,
-                format!(
-                    "Your order for {} (x{}) has been placed. Order ID: {}",
-                    medicine.name, quantity, order_id
-                ),
-            )
+        // Reduce stock
+        sqlx::query("UPDATE medicines SET stock = stock - $1 WHERE id = $2")
+            .bind(quantity)
+            .bind(medicine.id)
+            .execute(&mut *transaction)
             .await?;
-        } else {
-            bot.send_message(msg.chat.id, "Insufficient stock").await?;
-        }
+
+        // Get the current time in the local timezone
+        let local_tz = chrono::Local::now().timezone();
+        let now = chrono::Utc::now().with_timezone(&local_tz);
+
+        // Create order
+        let order_id = sqlx::query("INSERT INTO orders (user_id, medicine_id, quantity, status, created_at) VALUES ($1, $2, $3, 'pending', $4) RETURNING id")
+            .bind(&user_id)
+            .bind(medicine.id)
+            .bind(quantity)
+            .bind(now.naive_local())
+            .fetch_one(&mut *transaction)
+            .await?
+            .get::<i32, _>("id");
+
+        // Commit the transaction
+        transaction.commit().await?;
+
+        bot.send_message(
+            msg.chat.id,
+            format!(
+                "Your order for {} (x{}) has been placed. Order ID: {}",
+                medicine.name, quantity, order_id
+            ),
+        )
+        .await?;
     } else {
-        bot.send_message(msg.chat.id, "Medicine not found").await?;
+        bot.send_message(msg.chat.id, "Insufficient stock").await?;
     }
 
     Ok(())
