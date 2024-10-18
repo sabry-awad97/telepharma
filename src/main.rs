@@ -1,14 +1,16 @@
+use chrono::Duration;
 use dotenvy::dotenv;
 use dptree::case;
 use envconfig::Envconfig;
 use sqlx::PgPool;
+use std::str::FromStr;
 use teloxide::{
     dispatching::{
         dialogue::{self, InMemStorage},
         Dispatcher, UpdateFilterExt,
     },
     prelude::*,
-    types::{KeyboardButton, KeyboardMarkup, Me, ReplyMarkup},
+    types::{ChatPermissions, KeyboardButton, KeyboardMarkup, Me, ReplyMarkup},
     utils::command::BotCommands,
 };
 
@@ -27,7 +29,11 @@ pub struct Config {
 }
 
 #[derive(BotCommands, Debug, Clone)]
-#[command(rename_rule = "lowercase", description = "Available commands:")]
+#[command(
+    rename_rule = "lowercase",
+    description = "Available commands:",
+    parse_with = "split"
+)]
 enum Command {
     #[command(description = "Start interacting with the pharmacy bot.")]
     Start(String),
@@ -41,6 +47,31 @@ enum Command {
     Help,
     #[command(description = "Send an anonymous message to a pharmacist.")]
     Message,
+    #[command(description = "Kick a user from the chat")]
+    Kick,
+    #[command(description = "Ban a user from the chat")]
+    Ban { time: u64, unit: UnitOfTime },
+    #[command(description = "Mute a user in the chat")]
+    Mute { time: u64, unit: UnitOfTime },
+}
+
+#[derive(Clone, Debug)]
+enum UnitOfTime {
+    Seconds,
+    Minutes,
+    Hours,
+}
+
+impl FromStr for UnitOfTime {
+    type Err = &'static str;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "h" | "hours" => Ok(UnitOfTime::Hours),
+            "m" | "minutes" => Ok(UnitOfTime::Minutes),
+            "s" | "seconds" => Ok(UnitOfTime::Seconds),
+            _ => Err("Allowed units: h, m, s"),
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Debug, Default)]
@@ -341,7 +372,80 @@ async fn answer(
             // 3. The message should be sent to the user with Markdown parsing
             // 4. Verify that the help information is displayed correctly to the user
         }
+        Command::Kick => {
+            log::info!("Received kick command");
+            kick_user(bot, msg).await?
+
+            // This code handles the Kick command:
+            // 1. It logs that a kick command was received.
+            // 2. It calls the kick_user function with the bot and message as arguments.
+            // 3. The result of kick_user is propagated up with the ? operator.
+
+            // Test case: Send "/kick" command as a reply to another user's message
+            // Expected behavior:
+            // 1. The bot should log "Received kick command"
+            // 2. The kick_user function should be called with correct arguments
+            // 3. If kick_user succeeds, the command handler should return Ok(())
+            // 4. If kick_user fails, the error should be propagated up
+
+            // Additional test cases:
+            // - Send "/kick" without replying to a message
+            // - Send "/kick" as a non-admin user
+            // - Send "/kick" targeting an admin user
+        }
+        Command::Ban { time, unit } => {
+            log::info!("Received ban command: {} {:?}", time, unit);
+            ban_user(bot, msg, calc_restrict_time(time, unit)).await?
+
+            // This code handles the Ban command:
+            // 1. It logs that a ban command was received, including the time and unit.
+            // 2. It calls the ban_user function with the bot, message, and calculated restriction time.
+            // 3. The result of ban_user is propagated up with the ? operator.
+
+            // Test case: Send "/ban 2 h" command as a reply to another user's message
+            // Expected behavior:
+            // 1. The bot should log "Received ban command: 2 Hours"
+            // 2. The calc_restrict_time function should be called with (2, UnitOfTime::Hours)
+            // 3. The ban_user function should be called with correct arguments
+            // 4. If ban_user succeeds, the command handler should return Ok(())
+            // 5. If ban_user fails, the error should be propagated up
+
+            // Additional test cases:
+            // - Send "/ban 30 m" to ban for 30 minutes
+            // - Send "/ban 60 s" to ban for 60 seconds
+            // - Send "/ban" without time and unit (should handle error gracefully)
+            // - Send "/ban" as a non-admin user (should be rejected)
+            // - Send "/ban" targeting an admin user (should be rejected)
+        }
+        Command::Mute { time, unit } => {
+            log::info!("Received mute command: {} {:?}", time, unit);
+            mute_user(bot, msg, calc_restrict_time(time, unit)).await?
+
+            // This code handles the Mute command:
+            // 1. It logs that a mute command was received, including the time and unit.
+            // 2. It calls the calc_restrict_time function to convert the time and unit into a Duration.
+            // 3. It calls the mute_user function with the bot, message, and calculated restriction time.
+            // 4. The result of mute_user is propagated up with the ? operator.
+
+            // Test case: Send "/mute 5 m" command as a reply to another user's message
+            // Expected behavior:
+            // 1. The bot should log "Received mute command: 5 Minutes"
+            // 2. The calc_restrict_time function should be called with (5, UnitOfTime::Minutes)
+            // 3. The mute_user function should be called with correct arguments
+            // 4. If mute_user succeeds, the command handler should return Ok(())
+            // 5. If mute_user fails, the error should be propagated up
+
+            // Additional test cases:
+            // - Send "/mute 1 h" to mute for 1 hour
+            // - Send "/mute 30 s" to mute for 30 seconds
+            // - Send "/mute" without time and unit (should handle error gracefully)
+            // - Send "/mute" as a non-admin user (should be rejected)
+            // - Send "/mute" targeting an admin user (should be rejected)
+            // - Verify that the muted user cannot send messages for the specified duration
+            // - Verify that the mute is automatically lifted after the specified duration
+        }
     };
+
     Ok(())
 }
 
@@ -460,7 +564,7 @@ async fn handle_message(bot: Bot, msg: Message, pool: PgPool) -> Result<(), Erro
 /// # Arguments
 ///
 /// * `bot` - The Bot instance used to send messages.
-/// * `msg` - The original message that triggered this function.
+/// * msg` - The original message that triggered this function.
 /// * `pool` - The database connection pool.
 ///
 /// # Returns
@@ -610,4 +714,217 @@ pub async fn place_order(bot: Bot, msg: Message, pool: PgPool) -> ResponseResult
     }
 
     Ok(())
+}
+
+/// Kicks a user from a chat.
+///
+/// This function handles the process of kicking a user in response to a command.
+/// It checks if the command is a reply to another message, identifies the user to be kicked,
+/// applies the kick, and sends appropriate feedback messages.
+///
+/// # Arguments
+///
+/// * `bot` - The Bot instance used to interact with the Telegram API.
+/// * `msg` - The Message object that triggered this command.
+///
+/// # Returns
+///
+/// Returns a `ResponseResult<()>` which is `Ok(())` if the operation succeeds,
+/// or an error if any step fails.
+///
+/// # Function flow
+///
+/// 1. Check if the command is a reply to another message.
+/// 2. If it is a reply, try to identify the user to be kicked.
+/// 3. If a user is identified, attempt to kick them using `unban_chat_member`.
+/// 4. Send a confirmation message if the kick is successful.
+/// 5. If any step fails, send an appropriate error message.
+///
+/// # Note
+///
+/// This function uses `unban_chat_member` to kick the user. In Telegram's API,
+/// unbanning a user who is in the chat will remove them from the chat.
+async fn kick_user(bot: Bot, msg: Message) -> ResponseResult<()> {
+    if let Some(replied) = msg.reply_to_message() {
+        if let Some(user) = &replied.from {
+            // Kick the user by "unbanning" them
+            bot.unban_chat_member(msg.chat.id, user.id).await?;
+            // Send confirmation message
+            bot.send_message(
+                msg.chat.id,
+                format!("User {} has been kicked.", user.first_name),
+            )
+            .await?;
+        } else {
+            // Send error message if user couldn't be identified
+            bot.send_message(msg.chat.id, "Couldn't identify the user to kick.")
+                .await?;
+        }
+    } else {
+        // Send instruction if the command wasn't a reply
+        bot.send_message(msg.chat.id, "Use this command in reply to another message")
+            .await?;
+    }
+    Ok(())
+}
+
+/// Bans a user from a chat for a specified duration.
+///
+/// This function handles the process of banning a user in response to a command.
+/// It checks if the command is a reply to another message, identifies the user to be banned,
+/// applies the ban, and sends appropriate feedback messages.
+///
+/// # Arguments
+///
+/// * `bot` - The Bot instance used to interact with the Telegram API.
+/// * `msg` - The Message object that triggered this command.
+/// * `time` - A Duration object specifying how long the user should be banned.
+///
+/// # Returns
+///
+/// Returns a `ResponseResult<()>` which is `Ok(())` if the operation succeeds,
+/// or an error if any step fails.
+///
+/// # Errors
+///
+/// This function will return an error if:
+/// * The bot fails to ban the chat member.
+/// * The bot fails to send a message.
+///
+/// # Function flow
+///
+/// 1. Check if the command is a reply to another message.
+/// 2. If it is a reply, try to identify the user to be banned.
+/// 3. If a user is identified, attempt to ban them for the specified duration.
+/// 4. Send a confirmation message if the ban is successful.
+/// 5. If any step fails, send an appropriate error message.
+///
+/// # Note
+///
+/// This function uses `kick_chat_member` with an `until_date` parameter to implement a temporary ban.
+/// After the specified duration, the user will be able to join the chat again.
+async fn ban_user(bot: Bot, msg: Message, time: Duration) -> ResponseResult<()> {
+    // This code handles the process of banning a user in a Telegram chat.
+    // Here's a breakdown of what it does:
+
+    // 1. Check if the command is a reply to another message
+    if let Some(replied) = msg.reply_to_message() {
+        // 2. If it's a reply, try to get the user who sent the original message
+        if let Some(user) = &replied.from {
+            // 3. If we have a user, attempt to ban them
+            // The 'kick_chat_member' method is used for banning
+            // 'until_date' sets the duration of the ban
+            bot.kick_chat_member(msg.chat.id, user.id)
+                .until_date(msg.date + time)
+                .await?;
+
+            // 4. If the ban is successful, send a confirmation message
+            bot.send_message(
+                msg.chat.id,
+                format!(
+                    "User {} has been banned for the specified duration.",
+                    user.first_name
+                ),
+            )
+            .await?;
+        } else {
+            // 5. If we couldn't identify the user, send an error message
+            bot.send_message(msg.chat.id, "Couldn't identify the user to ban.")
+                .await?;
+        }
+    } else {
+        // 6. If the command wasn't a reply, instruct the user on how to use it
+        bot.send_message(
+            msg.chat.id,
+            "Use this command in a reply to another message!",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Mutes a user in a chat for a specified duration.
+///
+/// This function handles the process of muting a user in response to a command.
+/// It checks if the command is a reply to another message, identifies the user to be muted,
+/// applies the mute restriction, and sends appropriate feedback messages.
+///
+/// # Arguments
+///
+/// * `bot` - The Bot instance used to interact with the Telegram API.
+/// * `msg` - The Message object that triggered this command.
+/// * `time` - A Duration object specifying how long the user should be muted.
+///
+/// # Returns
+///
+/// Returns a `ResponseResult<()>` which is `Ok(())` if the operation succeeds,
+/// or an error if any step fails.
+///
+/// # Errors
+///
+/// This function will return an error if:
+/// * The bot fails to restrict the chat member.
+/// * The bot fails to send a message.
+///
+async fn mute_user(bot: Bot, msg: Message, time: Duration) -> ResponseResult<()> {
+    // This code handles the muting of a user in response to a command
+    if let Some(replied) = msg.reply_to_message() {
+        // Check if the command is a reply to another message
+        if let Some(user) = &replied.from {
+            // If we can identify the user to be muted
+            // Restrict the user's chat permissions
+            bot.restrict_chat_member(msg.chat.id, user.id, ChatPermissions::empty())
+                .until_date(msg.date + time)
+                .await?;
+
+            // Send a confirmation message
+            bot.send_message(
+                msg.chat.id,
+                format!(
+                    "User {} has been muted for the specified duration.",
+                    user.first_name
+                ),
+            )
+            .await?;
+        } else {
+            // If we couldn't identify the user to be muted
+            bot.send_message(msg.chat.id, "Couldn't identify the user to mute.")
+                .await?;
+        }
+    } else {
+        // If the command wasn't a reply to another message
+        bot.send_message(
+            msg.chat.id,
+            "Use this command in a reply to another message!",
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+/// Calculates the restriction time based on the given time and unit.
+///
+/// This function takes a time value and a unit of time, and returns a Duration
+/// object representing the total restriction time.
+///
+/// # Arguments
+///
+/// * `time` - An unsigned 64-bit integer representing the amount of time.
+/// * `unit` - A UnitOfTime enum value specifying the unit of the given time (Hours, Minutes, or Seconds).
+///
+/// # Returns
+///
+/// Returns a Duration object representing the calculated restriction time.
+///
+/// # Note
+///
+/// The function converts the input `time` from u64 to i64 when creating the Duration.
+/// This is safe for the expected use cases, but very large values might cause overflow.
+fn calc_restrict_time(time: u64, unit: UnitOfTime) -> Duration {
+    match unit {
+        UnitOfTime::Hours => Duration::hours(time as i64),
+        UnitOfTime::Minutes => Duration::minutes(time as i64),
+        UnitOfTime::Seconds => Duration::seconds(time as i64),
+    }
 }
