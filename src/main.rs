@@ -2,7 +2,9 @@ use chrono::Duration;
 use dotenvy::dotenv;
 use dptree::case;
 use envconfig::Envconfig;
-use sqlx::PgPool;
+use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::Row;
+use sqlx::SqlitePool;
 use std::str::FromStr;
 use teloxide::{
     dispatching::{
@@ -117,8 +119,9 @@ async fn main() -> Result<(), Error> {
     // Initialize configuration from environment variables
     let config = Config::init_from_env().unwrap();
 
-    // Establish a connection to the PostgreSQL database
-    let pool = PgPool::connect(&config.database_url).await?;
+    // Initialize SQLite database
+    let options = SqliteConnectOptions::from_str(&config.database_url)?.create_if_missing(true);
+    let pool = SqlitePool::connect_with(options).await?;
 
     // Create a new Telegram bot instance with the token from config
     let bot = Bot::new(config.telegram_bot_token);
@@ -226,7 +229,7 @@ async fn answer(
     bot: Bot,
     msg: Message,
     cmd: Command,
-    pool: PgPool,
+    pool: SqlitePool,
     dialogue: MyDialogue,
     me: Me,
 ) -> Result<(), Error> {
@@ -539,7 +542,7 @@ async fn send_message_to_pharmacist(
 /// # Error handling
 ///
 /// - Any errors during the process are propagated up the call stack.
-async fn handle_message(bot: Bot, msg: Message, pool: PgPool) -> Result<(), Error> {
+async fn handle_message(bot: Bot, msg: Message, pool: SqlitePool) -> Result<(), Error> {
     if let Some(text) = msg.text() {
         match text {
             "📋 Check Inventory" => list_inventory(bot, msg, pool).await?,
@@ -595,7 +598,7 @@ async fn handle_message(bot: Bot, msg: Message, pool: PgPool) -> Result<(), Erro
 /// - The expiry date (formatted as "DD Mon YYYY")
 ///
 /// Medicines are separated by two newlines for readability.
-async fn list_inventory(bot: Bot, msg: Message, pool: PgPool) -> ResponseResult<()> {
+async fn list_inventory(bot: Bot, msg: Message, pool: SqlitePool) -> ResponseResult<()> {
     log::info!("Listing inventory");
     let medicines = sqlx::query_as::<_, Medicine>("SELECT * FROM medicines")
         .fetch_all(&pool)
@@ -661,20 +664,20 @@ async fn list_inventory(bot: Bot, msg: Message, pool: PgPool) -> ResponseResult<
 /// - This implementation uses hardcoded values for medicine ID and quantity.
 /// - In a real-world scenario, these would typically be provided by the user through interaction.
 /// - The function uses database transactions to ensure data consistency when updating stock and creating orders.
-pub async fn place_order(bot: Bot, msg: Message, pool: PgPool) -> ResponseResult<()> {
+pub async fn place_order(bot: Bot, msg: Message, pool: SqlitePool) -> ResponseResult<()> {
     let user_id = msg.from.unwrap().id.to_string();
 
     // Simplified: Assume we're always ordering medicine with ID 1
     let medicine_id = 1;
     let quantity = 2;
 
-    let order = sqlx::query_as::<_, Medicine>("SELECT * FROM medicines WHERE id = $1")
+    let medicine = sqlx::query_as::<_, Medicine>("SELECT * FROM medicines WHERE id = $1")
         .bind(medicine_id)
         .fetch_one(&pool)
         .await;
 
-    if let Ok(order) = order {
-        if order.stock >= quantity {
+    if let Ok(medicine) = medicine {
+        if medicine.stock >= quantity {
             // Reduce stock and create order
             if let Err(e) = sqlx::query("UPDATE medicines SET stock = stock - $1 WHERE id = $2")
                 .bind(quantity)
@@ -689,23 +692,29 @@ pub async fn place_order(bot: Bot, msg: Message, pool: PgPool) -> ResponseResult
             }
 
             let now = chrono::Utc::now().naive_utc();
-            let order_id: i32 = rand::random();
-            if let Err(e) = sqlx::query("INSERT INTO orders (id, user_id, medicine_id, quantity, status, created_at) VALUES ($1, $2, $3, $4, 'pending', $5)")
-                .bind(order_id)
+            let order_id = match sqlx::query("INSERT INTO orders (user_id, medicine_id, quantity, status, created_at) VALUES ($1, $2, $3, 'pending', $4) RETURNING id")
                 .bind(&user_id)
                 .bind(medicine_id)
                 .bind(quantity)
                 .bind(now)
-                .execute(&pool)
+                .fetch_one(&pool)
                 .await
             {
-                log::error!("Failed to create order: {}", e);
-                bot.send_message(msg.chat.id, "Failed to create order").await?;
-                return Ok(());
-            }
-
-            bot.send_message(msg.chat.id, "Order placed successfully")
-                .await?;
+                Ok(row) => row.get::<i32, _>("id"),
+                Err(e) => {
+                    log::error!("Failed to create order: {}", e);
+                    bot.send_message(msg.chat.id, "Failed to create order").await?;
+                    return Ok(());
+                }
+            };
+            bot.send_message(
+                msg.chat.id,
+                format!(
+                    "Your order for {} (x{}) has been placed. Order ID: {}",
+                    medicine.name, quantity, order_id
+                ),
+            )
+            .await?;
         } else {
             bot.send_message(msg.chat.id, "Insufficient stock").await?;
         }

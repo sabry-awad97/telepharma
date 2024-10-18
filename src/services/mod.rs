@@ -4,7 +4,7 @@ use crate::{
 };
 use chrono::Utc;
 use futures::future;
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 use teloxide::prelude::*;
 use tokio_cron_scheduler::{Job, JobScheduler};
 
@@ -28,7 +28,7 @@ use tokio_cron_scheduler::{Job, JobScheduler};
 /// - `Ok(())` if the job is successfully scheduled and started.
 /// - `Err(Box<dyn std::error::Error>)` if any step fails.
 pub async fn schedule_notifications(
-    pool: PgPool,
+    pool: SqlitePool,
     bot: Bot,
     pharmacy_group_chat_id: ChatId,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -87,7 +87,7 @@ pub async fn schedule_notifications(
 /// Note: This function uses `?` operator to propagate errors from both
 /// `fetch_expiring_medicines` and `send_expiry_notification` functions.
 async fn check_and_notify_expiring_medicines(
-    pool: &PgPool,
+    pool: &SqlitePool,
     bot: &Bot,
     chat_id: ChatId,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -131,7 +131,7 @@ async fn check_and_notify_expiring_medicines(
 /// Returns a `Result` containing either:
 /// - `Ok(Vec<Medicine>)`: A vector of `Medicine` structs representing the medicines expiring within 6 months.
 /// - `Err(sqlx::Error)`: An error if the database query fails.
-async fn fetch_expiring_medicines(pool: &PgPool) -> Result<Vec<Medicine>, sqlx::Error> {
+async fn fetch_expiring_medicines(pool: &SqlitePool) -> Result<Vec<Medicine>, sqlx::Error> {
     let six_months_from_now = Utc::now() + chrono::Duration::days(180);
     sqlx::query_as::<_, Medicine>("SELECT * FROM medicines WHERE expiry_date <= $1")
         .bind(six_months_from_now.naive_utc())
