@@ -1,24 +1,21 @@
 use dotenvy::dotenv;
+use dptree::case;
 use envconfig::Envconfig;
 use sqlx::PgPool;
 use teloxide::{
-    dispatching::{Dispatcher, UpdateFilterExt},
+    dispatching::{
+        dialogue::{self, InMemStorage},
+        Dispatcher, UpdateFilterExt,
+    },
     prelude::*,
-    types::{KeyboardButton, KeyboardMarkup, ReplyMarkup},
+    types::{KeyboardButton, KeyboardMarkup, Me, ReplyMarkup},
     utils::command::BotCommands,
 };
 
-#[path = "db/mod.rs"]
-pub mod db;
-
-#[path = "handlers/mod.rs"]
-pub mod handlers;
-
-#[path = "services/mod.rs"]
 pub mod services;
-
-#[path = "utils/mod.rs"]
 pub mod utils;
+
+type Error = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Envconfig)]
 pub struct Config {
@@ -33,7 +30,7 @@ pub struct Config {
 #[command(rename_rule = "lowercase", description = "Available commands:")]
 enum Command {
     #[command(description = "Start interacting with the pharmacy bot.")]
-    Start,
+    Start(String),
     #[command(description = "Check the pharmacy inventory.")]
     Inventory,
     #[command(description = "Place a medicine order.")]
@@ -42,6 +39,8 @@ enum Command {
     Menu,
     #[command(description = "Display help information about available commands.")]
     Help,
+    #[command(description = "Send an anonymous message to a pharmacist.")]
+    Message,
 }
 
 impl Command {
@@ -51,24 +50,60 @@ impl Command {
     }
 }
 
+#[derive(Clone, PartialEq, Debug, Default)]
+pub enum State {
+    #[default]
+    Start,
+    WriteToPharmacist {
+        id: ChatId,
+    },
+}
+
+pub type MyDialogue = Dialogue<State, InMemStorage<State>>;
+
+#[derive(sqlx::FromRow, serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct Medicine {
+    pub id: i32,
+    pub name: String,
+    pub stock: i32,
+    pub expiry_date: chrono::NaiveDate,
+}
+
+#[derive(sqlx::FromRow, serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct Order {
+    pub id: i32,
+    pub user_id: String,
+    pub medicine_id: i32,
+    pub quantity: i32,
+    pub status: String,
+    pub created_at: chrono::NaiveDate,
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Error> {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
 
     log::info!("Starting the pharmacy bot...");
     dotenv().ok();
 
     let config = Config::init_from_env().unwrap();
-    let pool = db::init_db(&config.database_url).await.unwrap();
+    let pool = PgPool::connect(&config.database_url).await?;
 
     let bot = Bot::new(config.telegram_bot_token);
 
-    let handler = Update::filter_message()
-        .branch(dptree::entry().filter_command::<Command>().endpoint(answer))
-        .branch(dptree::entry().endpoint(handle_message));
+    let handler =
+        dialogue::enter::<Update, InMemStorage<State>, State, _>()
+            .branch(
+                Update::filter_message()
+                    .branch(dptree::entry().filter_command::<Command>().endpoint(answer)),
+            )
+            .branch(Update::filter_message().branch(
+                case![State::WriteToPharmacist { id }].endpoint(send_message_to_pharmacist),
+            ))
+            .branch(dptree::entry().endpoint(handle_message));
 
     Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![pool])
+        .dependencies(dptree::deps![pool, InMemStorage::<State>::new()])
         .enable_ctrlc_handler()
         .build()
         .dispatch()
@@ -78,21 +113,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn answer(bot: Bot, msg: Message, cmd: Command, pool: PgPool) -> ResponseResult<()> {
-    println!("Received command: {:?}", pool);
+async fn answer(
+    bot: Bot,
+    msg: Message,
+    cmd: Command,
+    pool: PgPool,
+    dialogue: MyDialogue,
+    me: Me,
+) -> Result<(), Error> {
     match cmd {
-        Command::Start => {
-            log::info!("Received start command");
-            bot.send_message(msg.chat.id, "Welcome to the pharmacy bot!")
-                .await?;
+        Command::Start(start_param) => {
+            if start_param.is_empty() {
+                // Regular start command
+                log::info!("Received start command");
+                bot.send_message(msg.chat.id, "Welcome to the pharmacy bot!")
+                    .await?;
+            } else {
+                // Deep link with pharmacist ID
+                match start_param.parse::<i64>() {
+                    Ok(id) => {
+                        bot.send_message(msg.chat.id, "Send your message to the pharmacist:")
+                            .await?;
+                        dialogue
+                            .update(State::WriteToPharmacist { id: ChatId(id) })
+                            .await?;
+                    }
+                    Err(_) => {
+                        bot.send_message(msg.chat.id, "Invalid link!").await?;
+                    }
+                }
+            }
+        }
+        Command::Message => {
+            let message_link = format!("{}?start={}", me.tme_url(), msg.chat.id);
+            bot.send_message(
+                msg.chat.id,
+                format!(
+                    "Share this link to receive anonymous messages: {}",
+                    message_link
+                ),
+            )
+            .await?;
         }
         Command::Inventory => {
             log::info!("Received inventory command");
-            handlers::inventory::list_inventory(bot, msg, pool).await?;
+            list_inventory(bot, msg, pool).await?;
         }
         Command::Order => {
             log::info!("Received order command");
-            handlers::order::place_order(bot, msg, pool).await?;
+            place_order(bot, msg, pool).await?;
         }
         Command::Menu => {
             log::info!("Received menu command");
@@ -135,11 +204,40 @@ async fn answer(bot: Bot, msg: Message, cmd: Command, pool: PgPool) -> ResponseR
     Ok(())
 }
 
-async fn handle_message(bot: Bot, msg: Message, pool: PgPool) -> ResponseResult<()> {
+async fn send_message_to_pharmacist(
+    bot: Bot,
+    id: ChatId,
+    msg: Message,
+    dialogue: MyDialogue,
+) -> Result<(), Error> {
+    if let Some(text) = msg.text() {
+        let sent_result = bot
+            .send_message(id, format!("You have a new anonymous message:\n\n{}", text))
+            .await;
+
+        if sent_result.is_ok() {
+            bot.send_message(msg.chat.id, "Message sent to the pharmacist!")
+                .await?;
+        } else {
+            bot.send_message(
+                msg.chat.id,
+                "Error sending message. The pharmacist may have blocked the bot.",
+            )
+            .await?;
+        }
+        dialogue.exit().await?;
+    } else {
+        bot.send_message(msg.chat.id, "Please send a text message.")
+            .await?;
+    }
+    Ok(())
+}
+
+async fn handle_message(bot: Bot, msg: Message, pool: PgPool) -> Result<(), Error> {
     if let Some(text) = msg.text() {
         match text {
-            "📋 Check Inventory" => handlers::inventory::list_inventory(bot, msg, pool).await?,
-            "🛒 Place Order" => handlers::order::place_order(bot, msg, pool).await?,
+            "📋 Check Inventory" => list_inventory(bot, msg, pool).await?,
+            "🛒 Place Order" => place_order(bot, msg, pool).await?,
             "❓ Help" => {
                 Command::Help.show_in_message(&bot, msg.chat.id).await?;
             }
@@ -148,5 +246,93 @@ async fn handle_message(bot: Bot, msg: Message, pool: PgPool) -> ResponseResult<
             }
         }
     }
+    Ok(())
+}
+
+async fn list_inventory(bot: Bot, msg: Message, pool: PgPool) -> ResponseResult<()> {
+    log::info!("Listing inventory");
+    let medicines = sqlx::query_as::<_, Medicine>("SELECT * FROM medicines")
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_else(|_| vec![]);
+
+    if medicines.is_empty() {
+        bot.send_message(msg.chat.id, "No medicines found in the inventory")
+            .await?;
+        return Ok(());
+    }
+
+    let message = medicines
+        .iter()
+        .map(|medicine| {
+            format!(
+                "🏥 *{}*\n   Stock: {} units\n   Expires: {}",
+                medicine.name,
+                medicine.stock,
+                medicine.expiry_date.format("%d %b %Y")
+            )
+        })
+        .collect::<Vec<String>>()
+        .join("\n\n");
+
+    let formatted_message = format!("*Available medicines:*\n\n{}", message);
+
+    bot.send_message(msg.chat.id, formatted_message).await?;
+
+    Ok(())
+}
+
+pub async fn place_order(bot: Bot, msg: Message, pool: PgPool) -> ResponseResult<()> {
+    let user_id = msg.from.unwrap().id.to_string();
+
+    // Simplified: Assume we're always ordering medicine with ID 1
+    let medicine_id = 1;
+    let quantity = 2;
+
+    let order = sqlx::query_as::<_, Medicine>("SELECT * FROM medicines WHERE id = $1")
+        .bind(medicine_id)
+        .fetch_one(&pool)
+        .await;
+
+    if let Ok(order) = order {
+        if order.stock >= quantity {
+            // Reduce stock and create order
+            if let Err(e) = sqlx::query("UPDATE medicines SET stock = stock - $1 WHERE id = $2")
+                .bind(quantity)
+                .bind(medicine_id)
+                .execute(&pool)
+                .await
+            {
+                log::error!("Failed to update stock: {}", e);
+                bot.send_message(msg.chat.id, "Failed to update stock")
+                    .await?;
+                return Ok(());
+            }
+
+            let now = chrono::Utc::now().naive_utc();
+            let order_id: i32 = rand::random();
+            if let Err(e) = sqlx::query("INSERT INTO orders (id, user_id, medicine_id, quantity, status, created_at) VALUES ($1, $2, $3, $4, 'pending', $5)")
+                .bind(order_id)
+                .bind(&user_id)
+                .bind(medicine_id)
+                .bind(quantity)
+                .bind(now)
+                .execute(&pool)
+                .await
+            {
+                log::error!("Failed to create order: {}", e);
+                bot.send_message(msg.chat.id, "Failed to create order").await?;
+                return Ok(());
+            }
+
+            bot.send_message(msg.chat.id, "Order placed successfully")
+                .await?;
+        } else {
+            bot.send_message(msg.chat.id, "Insufficient stock").await?;
+        }
+    } else {
+        bot.send_message(msg.chat.id, "Medicine not found").await?;
+    }
+
     Ok(())
 }

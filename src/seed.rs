@@ -1,12 +1,25 @@
 use chrono::NaiveDate;
 use sqlx::PgPool;
 
-#[path = "db/mod.rs"]
-pub mod db;
+#[derive(sqlx::FromRow, serde::Serialize, serde::Deserialize, Debug, Clone)]
+struct Medicine {
+    pub id: i32,
+    pub name: String,
+    pub stock: i32,
+    pub expiry_date: chrono::NaiveDate,
+}
 
-use crate::db::models::{Medicine, Order};
+#[derive(sqlx::FromRow, serde::Serialize, serde::Deserialize, Debug, Clone)]
+struct Order {
+    pub id: i32,
+    pub user_id: String,
+    pub medicine_id: i32,
+    pub quantity: i32,
+    pub status: String,
+    pub created_at: chrono::NaiveDate,
+}
 
-pub fn get_seed_data() -> (Vec<Medicine>, Vec<Order>) {
+fn get_seed_data() -> (Vec<Medicine>, Vec<Order>) {
     let seed_medicines = vec![
         Medicine {
             id: 1,

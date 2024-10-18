@@ -1,6 +1,6 @@
 use crate::{
-    db::models::Medicine,
     utils::{escape_markdown, format_date},
+    Medicine,
 };
 use chrono::Utc;
 use futures::future;
