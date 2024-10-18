@@ -36,6 +36,8 @@ enum Command {
     Inventory,
     #[command(description = "Place a medicine order.")]
     Order,
+    #[command(description = "Display the main menu.")]
+    Menu,
     #[command(description = "Display help information about available commands.")]
     Help,
 }
@@ -102,6 +104,25 @@ async fn answer(bot: Bot, msg: Message, cmd: Command, pool: PgPool) -> ResponseR
             log::info!("Received order command");
             handlers::order::place_order(bot, msg, pool).await?;
         }
+        Command::Menu => {
+            log::info!("Received menu command");
+            let menu_text = [
+                "*Pharmacy Bot Menu*",
+                "",
+                "Please choose an option:",
+                "",
+                "1️⃣ /inventory \\- Check inventory",
+                "2️⃣ /order \\- Place an order",
+                "3️⃣ /help \\- Get help",
+                "",
+                "What would you like to do?",
+            ]
+            .join("\n");
+
+            bot.send_message(msg.chat.id, menu_text)
+                .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+                .await?;
+        }
         Command::Help => {
             log::info!("Received help command");
             let help_text = [
@@ -112,6 +133,7 @@ async fn answer(bot: Bot, msg: Message, cmd: Command, pool: PgPool) -> ResponseR
                 "/start \\- Start interacting with the pharmacy bot",
                 "/inventory \\- Check the pharmacy inventory",
                 "/order \\- Place a medicine order",
+                "/menu \\- Display the main menu",
                 "/help \\- Display this help information",
                 "",
                 "To use a command, simply type it or tap on it\\.",
