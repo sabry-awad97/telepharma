@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS orders (
 );
 
 -- Seed data for medicines table
-INSERT INTO medicines (name, stock, expiry_date) VALUES
+INSERT OR IGNORE INTO medicines (name, stock, expiry_date) VALUES
     ('Acetaminophen 500mg', 1000, '2025-12-31'),
     ('Ibuprofen 200mg', 800, '2026-06-30'),
     ('Amoxicillin 250mg', 500, '2025-09-15'),
