@@ -1,7 +1,12 @@
 use dotenvy::dotenv;
 use envconfig::Envconfig;
 use sqlx::PgPool;
-use teloxide::{prelude::*, utils::command::BotCommands};
+use teloxide::{
+    dispatching::{Dispatcher, UpdateFilterExt},
+    prelude::*,
+    types::{KeyboardButton, KeyboardMarkup, ReplyMarkup},
+    utils::command::BotCommands,
+};
 
 #[path = "db/mod.rs"]
 pub mod db;
@@ -22,9 +27,6 @@ pub struct Config {
 
     #[envconfig(from = "DATABASE_URL")]
     database_url: String,
-
-    #[envconfig(from = "PHARMACY_GROUP_CHAT_ID")]
-    pharmacy_group_chat_id: i64,
 }
 
 #[derive(BotCommands, Debug, Clone)]
@@ -42,6 +44,13 @@ enum Command {
     Help,
 }
 
+impl Command {
+    async fn show_in_message(&self, bot: &Bot, chat_id: ChatId) -> ResponseResult<Message> {
+        bot.send_message(chat_id, Self::descriptions().to_string())
+            .await
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
@@ -52,37 +61,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::init_from_env().unwrap();
     let pool = db::init_db(&config.database_url).await.unwrap();
 
-    // Run migrations
-    if let Err(e) = sqlx::migrate!("./migrations").run(&pool).await {
-        log::error!("Failed to run migrations: {}", e);
-    }
-
     let bot = Bot::new(config.telegram_bot_token);
-    // Schedule notifications
-    let pharmacy_group_chat_id = ChatId(config.pharmacy_group_chat_id);
-    services::schedule_notifications(pool.clone(), bot.clone(), pharmacy_group_chat_id).await?;
 
-    // Create a shutdown signal handler
-    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen for Ctrl+C");
-        tx.send(()).ok();
-    });
+    let handler = Update::filter_message()
+        .branch(dptree::entry().filter_command::<Command>().endpoint(answer))
+        .branch(dptree::entry().endpoint(handle_message));
 
-    // Run the bot with graceful shutdown
-    tokio::select! {
-        _ = Command::repl(bot, move |cx, msg, cmd| {
-            let pool = pool.clone();
-            answer(cx, msg, cmd, pool)
-        }) => {
-            log::info!("Bot stopped");
-        }
-        _ = rx => {
-            log::info!("Received shutdown signal");
-        }
-    }
+    Dispatcher::builder(bot, handler)
+        .dependencies(dptree::deps![pool])
+        .enable_ctrlc_handler()
+        .build()
+        .dispatch()
+        .await;
 
     log::info!("Shutting down gracefully");
     Ok(())
@@ -106,21 +96,18 @@ async fn answer(bot: Bot, msg: Message, cmd: Command, pool: PgPool) -> ResponseR
         }
         Command::Menu => {
             log::info!("Received menu command");
-            let menu_text = [
-                "*Pharmacy Bot Menu*",
-                "",
-                "Please choose an option:",
-                "",
-                "1️⃣ /inventory \\- Check inventory",
-                "2️⃣ /order \\- Place an order",
-                "3️⃣ /help \\- Get help",
-                "",
-                "What would you like to do?",
-            ]
-            .join("\n");
+            let keyboard = KeyboardMarkup::new(vec![
+                vec![KeyboardButton::new("📋 Check Inventory")],
+                vec![KeyboardButton::new("🛒 Place Order")],
+                vec![KeyboardButton::new("❓ Help")],
+            ])
+            .resize_keyboard()
+            .one_time_keyboard();
+
+            let menu_text = "Welcome to the Pharmacy Bot! Please choose an option:";
 
             bot.send_message(msg.chat.id, menu_text)
-                .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+                .reply_markup(ReplyMarkup::Keyboard(keyboard))
                 .await?;
         }
         Command::Help => {
@@ -145,5 +132,21 @@ async fn answer(bot: Bot, msg: Message, cmd: Command, pool: PgPool) -> ResponseR
                 .await?;
         }
     };
+    Ok(())
+}
+
+async fn handle_message(bot: Bot, msg: Message, pool: PgPool) -> ResponseResult<()> {
+    if let Some(text) = msg.text() {
+        match text {
+            "📋 Check Inventory" => handlers::inventory::list_inventory(bot, msg, pool).await?,
+            "🛒 Place Order" => handlers::order::place_order(bot, msg, pool).await?,
+            "❓ Help" => {
+                Command::Help.show_in_message(&bot, msg.chat.id).await?;
+            }
+            _ => {
+                bot.send_message(msg.chat.id, "I don't understand that command. Please use the menu or type /help for available commands.").await?;
+            }
+        }
+    }
     Ok(())
 }
