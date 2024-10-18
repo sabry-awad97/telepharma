@@ -100,7 +100,7 @@ async fn main() -> Result<(), Error> {
             .branch(Update::filter_message().branch(
                 case![State::WriteToPharmacist { id }].endpoint(send_message_to_pharmacist),
             ))
-            .branch(dptree::entry().endpoint(handle_message));
+            .branch(Update::filter_message().endpoint(handle_message));
 
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![pool, InMemStorage::<State>::new()])
